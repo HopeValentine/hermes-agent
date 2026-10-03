@@ -19,6 +19,7 @@ import {
 } from '@/lib/desktop-slash-commands'
 import { $slashCompletionsEpoch, cachedSlashCompletion, hasCachedSlashCompletion } from '@/lib/slash-completion-cache'
 import { normalize } from '@/lib/text'
+import { $gateway } from '@/store/gateway'
 import { $sessions } from '@/store/session'
 
 import type { CompletionEntry, CompletionPayload } from './use-live-completion-adapter'
@@ -77,6 +78,11 @@ export function useSlashCompletions(options: {
   const { locale } = useI18n()
   const enabled = Boolean(gateway)
   const epoch = useStore($slashCompletionsEpoch)
+  // Live active gateway: a profile switch SWAPS the socket (store/gateway.ts
+  // applyActive -> $gateway), so the mount-time prop is stale for a composer
+  // that outlives the switch. Subscribing re-derives the calls on swap.
+  const currentGateway = useStore($gateway)
+  const liveGateway = currentGateway ?? gateway
 
   const sessionParams = useMemo(
     () => (sessionId ? { session_id: sessionId } : profile ? { profile } : {}),
@@ -88,12 +94,12 @@ export function useSlashCompletions(options: {
 
   // Warm argument_mode before the first `/` so Space treats /review as text.
   useEffect(() => {
-    if (!gateway) {
+    if (!liveGateway) {
       return
     }
 
     void cachedSlashCompletion(catalogKey, () =>
-      gateway.request<CommandsCatalogLike>('commands.catalog', sessionParams)
+      liveGateway.request<CommandsCatalogLike>('commands.catalog', sessionParams)
     )
       .then(catalog => {
         filterDesktopCommandsCatalog(catalog)
@@ -101,11 +107,11 @@ export function useSlashCompletions(options: {
       .catch(() => {
         // Next keystroke retries; don't block the composer on a warm-up miss.
       })
-  }, [gateway, epoch, catalogKey, sessionParams])
+  }, [liveGateway, epoch, catalogKey, sessionParams])
 
   const fetcher = useCallback(
     async (query: string): Promise<CompletionPayload> => {
-      if (!gateway) {
+      if (!liveGateway) {
         return { items: [], query }
       }
 
@@ -174,7 +180,7 @@ export function useSlashCompletions(options: {
         if (!query) {
           const catalog = filterDesktopCommandsCatalog(
             await cachedSlashCompletion(catalogKey, () =>
-              gateway.request<CommandsCatalogLike>('commands.catalog', sessionParams)
+              liveGateway.request<CommandsCatalogLike>('commands.catalog', sessionParams)
             )
           )
 
@@ -216,7 +222,7 @@ export function useSlashCompletions(options: {
         }
 
         const result = await cachedSlashCompletion(`slash:${scopeKey}:${text.toLowerCase()}`, () =>
-          gateway.request<{ items?: CompletionEntry[]; replace_from?: number }>('complete.slash', {
+          liveGateway.request<{ items?: CompletionEntry[]; replace_from?: number }>('complete.slash', {
             text,
             ...sessionParams
           })
@@ -289,7 +295,7 @@ export function useSlashCompletions(options: {
         return { items: [], query }
       }
     },
-    [gateway, skinThemes, activeSkin, scopeKey, catalogKey, sessionParams]
+    [liveGateway, skinThemes, activeSkin, scopeKey, catalogKey, sessionParams]
   )
 
   const toItem = useCallback((entry: CompletionEntry, index: number): Unstable_TriggerItem => {

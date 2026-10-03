@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { HermesGateway } from '@/hermes'
 import { queryClient } from '@/lib/query-client'
 import { invalidateSlashCompletions } from '@/lib/slash-completion-cache'
+import { $gateway } from '@/store/gateway'
 
 import { isSkillItem } from '../composer-utils'
 
@@ -186,5 +187,31 @@ describe('useSlashCompletions', () => {
     expect(groupOf('/refine')).toBe('Commands')
     expect(groupOf('/compress')).toBe('Commands')
     expect(groupOf('/docx')).toBe('Skills')
+  })
+
+  // A live profile switch swaps the socket behind the composer
+  // (store/gateway.ts applyActive → $gateway) while the composer's mount-time
+  // `gateway` prop still points at the profile the user left. Deriving the
+  // client per render is what keeps `/` answering from the backend actually
+  // on screen; reading the prop keeps querying a socket nobody owns.
+  it('follows the live gateway after a profile switch swaps the socket', async () => {
+    const beforeRequest = vi.fn().mockResolvedValue(CATALOG)
+    const afterRequest = vi.fn().mockResolvedValue(CATALOG)
+    const before = { request: beforeRequest } as unknown as HermesGateway
+    const after = { request: afterRequest } as unknown as HermesGateway
+
+    $gateway.set(before)
+    const api = harness(before)
+
+    await act(async () => {
+      $gateway.set(after)
+    })
+
+    await completions(api, 'review')
+
+    expect(afterRequest).toHaveBeenCalledWith('complete.slash', { text: '/review' })
+    expect(
+      beforeRequest.mock.calls.filter(([method]) => method === 'complete.slash')
+    ).toEqual([])
   })
 })
