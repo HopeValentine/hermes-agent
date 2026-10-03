@@ -6477,6 +6477,20 @@ def _define_discord_view_classes() -> None:
                     item.label = _t_discord(key, _DISCORD_BUTTON_LABEL_LIMIT)
 
         async def on_timeout(self):
+            """Never overwrite an ANSWERED card with the expired footer.
+
+            discord.py fires this when the view timer expires -- including after a button was
+            clicked, because the timer is not stopped by the resolve. Stamping
+            ``platform.discord.prompt.expired_footer`` over an already-resolved embed told the
+            operator a COMPLETED approval had expired and nothing ran (2026-09-29: the approve
+            card flipped at +5 min despite a successful approval; the deny test card flipped the
+            same way). That is exactly the stale state that invites a duplicate re-dispatch.
+            Only a genuinely unanswered prompt is marked expired; the buttons are disabled in
+            both cases.
+            """
+            if self.resolved:
+                self._disable_all()
+                return
             self.resolved = True
             self._disable_all()
             await self._expire_embed(t("platform.discord.prompt.expired_footer"))
