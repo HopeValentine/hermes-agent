@@ -12,10 +12,10 @@ recovery. The two small helpers below are shared by those predicates and by the 
 
 from __future__ import annotations
 
-from typing import Any, Tuple
+from typing import Any
 
 
-def _contains_any(text: str, needles: Tuple[str, ...]) -> bool:
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     """True when any needle is a substring of ``text``."""
     return any(kw in text for kw in needles)
 
