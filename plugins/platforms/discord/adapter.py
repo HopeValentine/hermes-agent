@@ -1257,6 +1257,7 @@ def _read_discord_prompt_timeout() -> int:
     return seconds
 
 
+from plugins.platforms.discord.adapter_exec_approval import DiscordExecApprovalMixin
 from plugins.platforms.discord.adapter_media import DiscordMediaMixin
 from plugins.platforms.discord.adapter_slash_auth import DiscordSlashAuthMixin
 from plugins.platforms.discord.adapter_thread_titles import DiscordThreadTitlesMixin, SemanticThreadRenames
@@ -1264,7 +1265,7 @@ from plugins.platforms.discord.adapter_voice_info import DiscordVoiceInfoMixin
 
 
 class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
-                     BasePlatformAdapter):
+                     DiscordExecApprovalMixin, BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
 
     MAX_MESSAGE_LENGTH = 2000
@@ -5734,17 +5735,6 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         line = t("gateway.exec_approval.smart_deny_line")
         label, sep, rest = line.partition(":")
         return "\n\n" + (f"**{label}:**{rest}" if sep else f"**{line}**")
-    # The reason shares the 2000-char content cap with the command; unbounded it would starve
-    # the command preview to zero and push the content past the cap.
-    _EA_REASON_BUDGET = 300
-
-    def _exec_approval_cmd_budget(self, description: str, smart_denied: bool) -> int:
-        # Mentions ride in front of the content and count against the 2000-char message cap too.
-        fixed = (len(self._EA_HEADER) + len(self._EA_CODE_OPEN) + len(self._EA_CODE_CLOSE)
-                 + len(self._EA_REASON_LABEL) + len(description) + len("...") + len(self._ea_deadline_line())
-                 + (len(self._EA_SMART_DENY_LINE) if smart_denied else 0)
-                 + len(self._approval_mention_content() or "") + 1)
-        return max(0, self.MAX_MESSAGE_LENGTH - fixed)
 
     async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:
         """Send an approval with content as its canonical payload and an embed for state."""
