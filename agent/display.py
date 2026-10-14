@@ -423,9 +423,9 @@ def _preview_memory(args: dict, _max_len: int) -> str:
     action, target = args.get("action", ""), args.get("target", "")
     if action == "add":
         return f"+{target}: \"{_clip(_oneline(args.get('content', '')), 25)}\""
-    if action in ("replace", "remove"):
+    if action in ("replace", "patch", "remove"):
         old = _oneline(args.get("old_text") or "") or t("display.preview.missing_old_text")
-        return f"{'~' if action == 'replace' else '-'}{target}: \"{old[:20]}\""
+        return f"{'-' if action == 'remove' else '~'}{target}: \"{old[:20]}\""
     return action
 
 
@@ -951,7 +951,7 @@ class KawaiiSpinner:
         redirect_stdout(devnull) because _write targets the stdout captured at creation."""
         self._write(f"\r{self._clear_line_blanks()}\r  {text}" if self.running else f"  {text}", flush=True)
 
-    def stop(self, final_message: str = None):
+    def stop(self, final_message: str | None = None):
         self.running = False
         if self.thread:
             self.thread.join(timeout=0.5)
@@ -1093,9 +1093,9 @@ def _cute_memory(a: dict, _r) -> str:
     action, target = a.get("action", "?"), a.get("target", "")
     if action == "add":
         return _cute_row("🧠", "memory", f"+{target}: \"{_cute_trunc(a.get('content', ''))}\"")
-    if action in ("replace", "remove"):
+    if action in ("replace", "patch", "remove"):
         old = a.get("old_text") or t("display.preview.missing_old_text")
-        return _cute_row("🧠", "memory", f"{'~' if action == 'replace' else '-'}{target}: \"{_cute_trunc(old)}\"")
+        return _cute_row("🧠", "memory", f"{'-' if action == 'remove' else '~'}{target}: \"{_cute_trunc(old)}\"")
     return _cute_row("🧠", "memory", str(action))
 
 

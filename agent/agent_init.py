@@ -24,14 +24,16 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
 from agent.agent_init_fallback import _fallback_entries, _init_fallback_chain, recompute_init_fallback_api_mode
+from agent.agent_init_params import _CALLBACK_PARAMS, _GATEWAY_IDENTITY_PARAMS, _PASSTHROUGH_PARAMS
 from agent.agent_runtime_helpers import _ra
 from agent.iteration_budget import IterationBudget, normalize_budget_warning_ratio
 from agent.memory_manager import StreamingContextScrubber
 from agent.memory_provider import is_core_memory_provider
 from agent.session_activity import ActivityProvenance
 from agent.model_metadata import (
-    MINIMUM_CONTEXT_LENGTH, fetch_model_metadata, is_local_endpoint, query_ollama_num_ctx
+    MINIMUM_CONTEXT_LENGTH, fetch_model_metadata, is_local_endpoint
 )
+from agent.agent_init_ollama import _clamp_compressor_to_ollama_num_ctx, _configure_ollama_num_ctx
 from agent.process_bootstrap import _install_safe_stdio
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.think_scrubber import StreamingThinkScrubber
@@ -184,8 +186,8 @@ def _build_codex_gpt5_autoraise_notice(
     else:
         # Static fallback: codex-spark is natively 128K; gpt-5.4/5.5/5.6 are capped at 272K.
         cap = "128K" if model.startswith("gpt-5.3-codex-spark") else "272K"
-    from_pct = int(round(autoraise["from"] * 100))
-    to_pct = int(round(autoraise["to"] * 100))
+    from_pct = round(autoraise["from"] * 100)
+    to_pct = round(autoraise["to"] * 100)
     return (
         f"ℹ Codex {model} caps context at {cap}, so auto-compaction was raised "
         f"to {to_pct}% (from {from_pct}%) to use more of the window before "
@@ -225,8 +227,8 @@ def _codex_gpt55_autoraise_notice_state(autoraise: dict[str, Any]) -> str:
     different autoraised Codex model re-notifies once.
     """
     model = str(autoraise.get("model") or "").strip().lower().rsplit("/", 1)[-1]
-    from_pct = int(round(float(autoraise["from"]) * 100))
-    to_pct = int(round(float(autoraise["to"]) * 100))
+    from_pct = round(float(autoraise["from"]) * 100)
+    to_pct = round(float(autoraise["to"]) * 100)
     return f"{model}:{from_pct}:{to_pct}"
 
 
@@ -1301,6 +1303,11 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        agent._memory_manager = None
+        return
     # skip_memory skips the external *provider*; enabled_toolsets=["memory"] still gets the
     # built-in store so the memory tool never sees store=None.
     # Flush/background agents can still pass enabled_toolsets=["memory"] so the built-in file store exists
@@ -1896,6 +1903,10 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
 def _select_context_engine(_agent_cfg):
     """Config-driven context engine: ``context.engine`` → plugins/context_engine/<name>/ →
     general plugin system → None (built-in ContextCompressor)."""
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        return None
     _engine_name = "compressor"
     with suppress(Exception):
         _ctx_cfg = _agent_cfg.get("context", {}) if isinstance(_agent_cfg, dict) else {}
@@ -2151,67 +2162,6 @@ def _inject_context_engine_tools(agent):
             _ra().logger.debug("Context engine on_session_start: %s", _ce_err)
 
 
-def _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length):
-    # Ollama defaults num_ctx to 2048, so detect the max window and send num_ctx per request.
-    # model.ollama_num_ctx overrides; model.context_length caps the detected value (VRAM).
-    agent._ollama_num_ctx: int | None = None
-    _override = _model_cfg.get("ollama_num_ctx") if isinstance(_model_cfg, dict) else None
-    if _override is not None:
-        try:
-            agent._ollama_num_ctx = int(_override)
-        except (TypeError, ValueError):
-            _ra().logger.debug("Invalid ollama_num_ctx config value: %r", _override)
-    if agent._ollama_num_ctx is None and agent.base_url and is_local_endpoint(agent.base_url):
-        try:
-            # api_key may be a callable (Entra token provider); detection needs a string.
-            _key = agent.api_key if isinstance(agent.api_key, str) else ""
-            _detected = query_ollama_num_ctx(agent.model, agent.base_url, api_key=_key or "")
-            if _detected and _detected > 0:
-                agent._ollama_num_ctx = _detected
-        except Exception as exc:
-            _ra().logger.debug("Local server num_ctx detection failed: %s", exc)
-    # Cap auto-detected num_ctx to the explicit context_length (GGUF metadata can advertise
-    # 256K+ and Ollama would allocate that much VRAM); never override an explicit num_ctx.
-    if (
-        agent._ollama_num_ctx
-        and _config_context_length
-        and _override is None
-        and agent._ollama_num_ctx > _config_context_length
-    ):
-        _ra().logger.info(
-            "Ollama num_ctx capped: %d -> %d (model.context_length override)",
-            agent._ollama_num_ctx, _config_context_length,
-        )
-        agent._ollama_num_ctx = _config_context_length
-    if agent._ollama_num_ctx and not agent.quiet_mode:
-        # Name the real source: a config override is honoured on any local server, /api/show is Ollama-only.
-        _ra().logger.info(
-            "Local server num_ctx: will request %d tokens (%s)",
-            agent._ollama_num_ctx,
-            "model.ollama_num_ctx" if _override is not None else "model max from Ollama /api/show",
-        )
-
-
-def _clamp_compressor_to_ollama_num_ctx(agent):
-    # Recalibrate the compressor to the served window: every request runs at num_ctx, so a
-    # trigger derived from the probed model window could sit above it and never fire.
-    # A config that sets only model.ollama_num_ctx (without model.context_length) previously left the
-    # compressor targeting the probed window while the server truncated/rejected at num_ctx — the compaction
-    # trigger could sit several times ABOVE the real served window and never fire. Clamp the compressor's
-    # window to the effective num_ctx so threshold math operates on the context the server actually serves.
-    # (Overlaps #60103's silent-clamp dead zone; this is the init-order half.)
-    _cc_window = getattr(agent.context_compressor, "context_length", 0) or 0
-    if agent._ollama_num_ctx and agent._ollama_num_ctx > 0 and _cc_window and agent._ollama_num_ctx < _cc_window:
-        _ra().logger.info(
-            "Compressor window clamped to Ollama num_ctx: %d -> %d",
-            _cc_window, agent._ollama_num_ctx,
-        )
-        agent.context_compressor.update_model(
-            model=agent.model, context_length=agent._ollama_num_ctx, base_url=agent.base_url,
-            api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
-        )
-
-
 def _emit_compression_summary(agent, cs):
     # Codex autoraise notice: once per profile/config state (persisted marker; the gateway
     # rebuilds the agent per message). The display gate hides the banner, not the autoraise.
@@ -2326,76 +2276,54 @@ _USAGE_STATE: dict[str, Any] = {
     "_api_output_history": lambda: deque(maxlen=10),
 }
 
-# Constructor params stored verbatim under the same name.
-_PASSTHROUGH_PARAMS = (
-    "model", "max_iterations", "save_trajectories", "verbose_logging", "quiet_mode",
-    "tool_progress_mode", "ephemeral_system_prompt", "platform", "skip_context_files",
-    "load_soul_identity", "pass_session_id", "log_prefix_chars",
-    # OpenRouter provider preferences
-    "providers_allowed", "providers_ignored", "providers_order", "provider_sort",
-    "provider_require_parameters", "provider_data_collection", "openrouter_min_coding_score",
-    # Toolset filtering
-    "enabled_toolsets", "disabled_toolsets",
-    # Model response configuration (None = provider/model default)
-    "max_tokens", "reasoning_config", "service_tier",
-    "side_agent",
-)
-# Gateway identity params stored as ``agent._<name>``. gateway_session_key is the stable
-# per-chat key (e.g. agent:main:telegram:dm:123).
-_GATEWAY_IDENTITY_PARAMS = (
-    "user_id", "user_id_alt", "user_name", "chat_id", "chat_name", "chat_type", "thread_id",
-    "gateway_session_key",
-)
-_CALLBACK_PARAMS = (
-    "tool_progress_callback", "tool_start_callback", "tool_complete_callback",
-    "tool_result_metadata_callback",
-    "thinking_callback", "reasoning_callback", "clarify_callback",
-    "read_terminal_callback", "read_preview_callback", "drive_preview_callback",
-    "read_window_below_callback", "connection_callback", "tour_callback",
-    "setup_choose_callback", "step_callback", "stream_delta_callback", "interim_assistant_callback",
-    "status_callback", "notice_callback", "notice_clear_callback",
-    "event_callback", "reaction_callback", "tool_gen_callback",
-)
-
 
 def init_agent(
-    agent, base_url: str = None, api_key: str = None, provider: str = None, api_mode: str = None,
-    acp_command: str = None, acp_args: list[str] | None = None, command: str = None,
+    agent, base_url: str | None = None, api_key: str | None = None, provider: str | None = None, api_mode: str | None = None,
+    acp_command: str | None = None, acp_args: list[str] | None = None, command: str | None = None,
     args: list[str] | None = None, model: str = "", max_iterations: int = sys.maxsize,
-    enabled_toolsets: list[str] = None, disabled_toolsets: list[str] = None,
+    enabled_toolsets: list[str] | None = None, disabled_toolsets: list[str] | None = None,
     save_trajectories: bool = False, verbose_logging: bool = False, quiet_mode: bool = False,
-    tool_progress_mode: str = "all", ephemeral_system_prompt: str = None,
-    log_prefix_chars: int = 100, log_prefix: str = "", providers_allowed: list[str] = None,
-    providers_ignored: list[str] = None, providers_order: list[str] = None,
-    provider_sort: str = None, provider_require_parameters: bool = False,
-    provider_data_collection: str = None, openrouter_min_coding_score: Optional[float] = None,
-    session_id: str = None, tool_progress_callback: callable = None,
-    tool_start_callback: callable = None, tool_complete_callback: callable = None,
-    thinking_callback: callable = None, reasoning_callback: callable = None,
-    clarify_callback: callable = None, read_terminal_callback: callable = None,
-    read_preview_callback: callable = None, drive_preview_callback: callable = None,
-    read_window_below_callback: callable = None, connection_callback: callable = None,
-    tour_callback: callable = None, setup_choose_callback: callable = None, step_callback: callable = None,
-    stream_delta_callback: callable = None, interim_assistant_callback: callable = None,
-    tool_gen_callback: callable = None, status_callback: callable = None,
-    notice_callback: callable = None, notice_clear_callback: callable = None,
+    tool_progress_mode: str = "all", ephemeral_system_prompt: str | None = None,
+    log_prefix_chars: int = 100, log_prefix: str = "", providers_allowed: list[str] | None = None,
+    providers_ignored: list[str] | None = None, providers_order: list[str] | None = None,
+    provider_sort: str | None = None, provider_require_parameters: bool = False,
+    provider_data_collection: str | None = None, openrouter_min_coding_score: Optional[float] = None,
+    session_id: str | None = None, tool_progress_callback: Callable[..., Any] | None = None,
+    tool_start_callback: Callable[..., Any] | None = None, tool_complete_callback: Callable[..., Any] | None = None,
+    thinking_callback: Callable[..., Any] | None = None, reasoning_callback: Callable[..., Any] | None = None,
+    clarify_callback: Callable[..., Any] | None = None, read_terminal_callback: Callable[..., Any] | None = None,
+    read_preview_callback: Callable[..., Any] | None = None, drive_preview_callback: Callable[..., Any] | None = None,
+    read_window_below_callback: Callable[..., Any] | None = None, connection_callback: Callable[..., Any] | None = None,
+    tour_callback: Callable[..., Any] | None = None, theme_callback: Callable[..., Any] | None = None,
+    setup_beat_callback: Callable[..., Any] | None = None,
+    step_callback: Callable[..., Any] | None = None,
+    stream_delta_callback: Callable[..., Any] | None = None, interim_assistant_callback: Callable[..., Any] | None = None,
+    tool_gen_callback: Callable[..., Any] | None = None, status_callback: Callable[..., Any] | None = None,
+    notice_callback: Callable[..., Any] | None = None, notice_clear_callback: Callable[..., Any] | None = None,
     event_callback: Optional[Callable[[str, dict], None]] = None,
-    reaction_callback: Optional[Callable[[str], None]] = None, max_tokens: int = None,
-    reasoning_config: dict[str, Any] = None, service_tier: str = None,
-    request_overrides: dict[str, Any] = None, prefill_messages: list[dict[str, Any]] = None,
-    platform: str = None, user_id: str = None, user_id_alt: str = None, user_name: str = None,
-    chat_id: str = None, chat_name: str = None, chat_type: str = None, thread_id: str = None,
-    gateway_session_key: str = None, skip_context_files: bool = False,
+    reaction_callback: Optional[Callable[[str], None]] = None, max_tokens: int | None = None,
+    reasoning_config: dict[str, Any] | None = None, service_tier: str | None = None,
+    request_overrides: dict[str, Any] | None = None, prefill_messages: list[dict[str, Any]] | None = None,
+    platform: str | None = None, user_id: str | None = None, user_id_alt: str | None = None, user_name: str | None = None,
+    chat_id: str | None = None, chat_name: str | None = None, chat_type: str | None = None, thread_id: str | None = None,
+    gateway_session_key: str | None = None, skip_context_files: bool = False,
     load_soul_identity: bool = False, skip_memory: bool = False,
-    skip_background_review: bool = False, session_db=None, parent_session_id: str = None,
-    iteration_budget: "IterationBudget" = None, run_budget_seconds: Optional[float] = None,
-    fallback_model: dict[str, Any] = None, credential_pool=None, checkpoints_enabled: bool = False,
+    skip_background_review: bool = False, session_db=None, parent_session_id: str | None = None,
+    iteration_budget: IterationBudget = None, run_budget_seconds: Optional[float] = None,
+    fallback_model: dict[str, Any] | None = None, credential_pool=None, checkpoints_enabled: bool = False,
     checkpoint_max_snapshots: int = 20, checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10, pass_session_id: bool = False,
-    requested_provider: str = None, capabilities: Optional[dict[str, bool]] = None, cwd: Optional[str] = None,
+    requested_provider: str | None = None, capabilities: Optional[dict[str, bool]] = None, cwd: Optional[str] = None,
     side_agent: bool = False, memory_manager=None,
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
 ):
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        skip_context_files = skip_memory = skip_background_review = True
+        load_soul_identity = False
+        prefill_messages = []
+        fallback_model = {}
     _install_safe_stdio()
 
     _params = locals()
@@ -2449,9 +2377,9 @@ def init_agent(
     agent.request_overrides = dict(request_overrides or {})
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
-    # Every (provider, model) that rejected image content this session. build_api_request strips
-    # images from requests to those models only, so history keeps them for any model that can see.
+    # Routes that rejected image content / named reasoning keys; build_api_request strips those from wire copies only.
     agent._image_rejecting_models = set()
+    agent._reasoning_rejecting_routes = {}  # (provider, host, model) -> rejected reasoning keys
     # Models whose Anthropic organization answered a fast request with a fast-mode limit of 0;
     # agent.fast_mode stops sending ``speed`` to them for the rest of the session.
     agent._fast_mode_unavailable_models = set()

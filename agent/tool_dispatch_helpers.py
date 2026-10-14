@@ -27,7 +27,7 @@ from tools.threat_patterns import scan_for_threats
 logger = logging.getLogger(__name__)
 
 # Interactive / user-facing tools never run concurrently: any of these in a batch is a barrier.
-_NEVER_PARALLEL_TOOLS = frozenset({"clarify", "manage_connections", "manage_catalog", "setup_choose"})
+_NEVER_PARALLEL_TOOLS = frozenset({"clarify", "manage_connections", "manage_catalog", "setup_beat", "set_theme"})
 
 # Read-only tools with no shared mutable session state.
 _PARALLEL_SAFE_TOOLS = frozenset({
@@ -582,13 +582,29 @@ def _maybe_wrap_untrusted(name: str, content: Any) -> Any:
 
 
 __all__ = [
-    "_NEVER_PARALLEL_TOOLS", "_PARALLEL_SAFE_TOOLS", "_PATH_SCOPED_TOOLS", "_PATH_SCOPED_READERS",
-    "_PATH_SCOPED_WRITERS", "_DESTRUCTIVE_PATTERNS", "_REDIRECT_OVERWRITE", "_context_pruned_argument_paths",
+    "_DESTRUCTIVE_PATTERNS",
+    "_NEVER_PARALLEL_TOOLS",
+    "_PARALLEL_SAFE_TOOLS",
+    "_PATH_SCOPED_READERS",
+    "_PATH_SCOPED_TOOLS",
+    "_PATH_SCOPED_WRITERS",
+    "_REDIRECT_OVERWRITE",
+    "_append_subdir_hint_to_multimodal",
+    "_canonical_path",
+    "_context_pruned_argument_paths",
+    "_detect_upstream_elision",
+    "_extract_error_preview",
+    "_extract_file_mutation_targets",
+    "_extract_landed_file_mutation_paths",
+    "_extract_parallel_scope_path",
+    "_extract_parallel_scope_paths",
     "_is_destructive_command",
-    "_plan_tool_batch_segments", "_should_parallelize_tool_batch", "_canonical_path",
-    "_extract_parallel_scope_path", "_extract_parallel_scope_paths", "_paths_overlap",
-    "_is_multimodal_tool_result", "_multimodal_text_summary", "_append_subdir_hint_to_multimodal",
-    "_extract_file_mutation_targets", "_extract_landed_file_mutation_paths", "_extract_error_preview",
-    "_trajectory_normalize_msg", "_detect_upstream_elision", "_maybe_append_elision_notice",
+    "_is_multimodal_tool_result",
+    "_maybe_append_elision_notice",
+    "_multimodal_text_summary",
+    "_paths_overlap",
+    "_plan_tool_batch_segments",
+    "_should_parallelize_tool_batch",
+    "_trajectory_normalize_msg",
     "make_tool_result_message",
 ]

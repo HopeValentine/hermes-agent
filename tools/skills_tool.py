@@ -4,11 +4,12 @@ holding SKILL.md (YAML frontmatter + instructions) plus optional references/, te
 scripts/. `skills_list` returns name/description only; `skill_view` returns full content and
 linked files. Sibling modules (skills_tool_setup / _plugin / _dedup) re-export here."""
 
+import contextvars
 import json
 import logging
 import os
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -95,7 +96,12 @@ def _skill_lookup_path_error(name: str) -> Optional[str]:
 
 def load_env() -> dict[str, str]:
     """Snapshot of HERMES_HOME/.env for the post-skill secret-capture diff (same tokenizer that
-    installs the profile scope, so a captured value never differs from the served one)."""
+    installs the profile scope, so a captured value never differs from the served one). A frozen-policy
+    worker never opens the profile ``.env``: ``hermes_cli.config.load_env`` owns that short-circuit."""
+    from agent.safe_worker_policy import worker_config_snapshot
+
+    if worker_config_snapshot() is not None:
+        return {}
     from agent.secret_scope import load_env_file
 
     return load_env_file(get_hermes_home() / ".env")
@@ -104,6 +110,21 @@ def load_env() -> dict[str, str]:
 def set_secret_capture_callback(callback) -> None:
     global _secret_capture_callback
     _secret_capture_callback = callback
+
+
+# A turn-scoped capture callback (the session owner binds one per local-viewer turn): it wins over the
+# process-global slot and over the gateway-surface "unsupported" hint, because that turn's viewer can
+# answer. A ContextVar, so tool worker threads started with ``propagate_context_to_thread`` inherit it.
+_turn_secret_capture = contextvars.ContextVar("turn_secret_capture", default=None)
+
+
+@contextmanager
+def bind_turn_secret_capture(callback):
+    token = _turn_secret_capture.set(callback)
+    try:
+        yield
+    finally:
+        _turn_secret_capture.reset(token)
 
 
 def _skill_utils_delegate(attr: str):
@@ -153,7 +174,7 @@ def _parse_tags(tags_value) -> list[str]:
     return [t.strip().strip("\"'") for t in tags_value.split(",") if t.strip()]
 
 
-def _is_skill_disabled(*names: str, platform: str = None) -> bool:
+def _is_skill_disabled(*names: str, platform: str | None = None) -> bool:
     """Any of *names* disabled in config (one config load)? Platform precedence: explicit arg,
     ``HERMES_PLATFORM``, session ``HERMES_SESSION_PLATFORM``. A globally-disabled skill stays disabled on every platform
     (keep in sync with agent.skill_utils.get_disabled_skill_names)."""
@@ -245,7 +266,7 @@ def _sort_skills(skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
 
 
-def skills_list(category: str = None, task_id: str = None) -> str:
+def skills_list(category: str | None = None, task_id: str | None = None) -> str:
     """Tier 1 listing: name + description (+ category) only; ``task_id`` is handler parity."""
     try:
         _skills_dir().mkdir(parents=True, exist_ok=True)
@@ -548,7 +569,7 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
 
 
 def skill_view(
-    name: str, file_path: str = None, task_id: str = None, preprocess: bool = True) -> str:
+    name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
     or path ("axolotl", "03-fine-tuning/axolotl"); "plugin:skill" resolves plugin-provided
     skills. ``preprocess`` applies the configured SKILL.md template / inline shell rendering;
