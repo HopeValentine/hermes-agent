@@ -1200,30 +1200,8 @@ class VoiceReceiver:
         )
 
 
-def _read_dm_role_auth_guild() -> Optional[int]:
-    """Return the guild ID opted-in for DM role-based auth, or None (secure default). Read from
-    config.yaml ``discord.dm_role_auth_guild`` only (behavioral, not a secret); int or numeric string."""
-    try:
-        from hermes_cli.config import read_raw_config
-        cfg = read_raw_config() or {}
-        discord_cfg = cfg.get("discord", {}) or {}
-        raw = discord_cfg.get("dm_role_auth_guild")
-    except Exception:
-        return None
-    if raw is None or raw == "":
-        return None
-    try:
-        guild_id = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return guild_id if guild_id > 0 else None
-
-
-# Default timeout for Discord button views when ``approvals.discord_prompt_timeout`` is unset;
-# Discord interaction tokens expire at ~15 minutes, so 900s is the practical ceiling.
-_DISCORD_PROMPT_TIMEOUT_DEFAULT = 300
-_DISCORD_PROMPT_TIMEOUT_MIN = 30
-_DISCORD_PROMPT_TIMEOUT_MAX = 900
+from plugins.platforms.discord.adapter_config_readers import (
+    _DISCORD_PROMPT_TIMEOUT_DEFAULT, _DISCORD_PROMPT_TIMEOUT_MIN, _read_discord_prompt_timeout, _read_dm_role_auth_guild)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -1259,13 +1237,14 @@ def _read_discord_prompt_timeout() -> int:
 
 from plugins.platforms.discord.adapter_exec_approval import DiscordExecApprovalMixin
 from plugins.platforms.discord.adapter_media import DiscordMediaMixin
+from plugins.platforms.discord.adapter_authorization import DiscordAuthorizationMixin
 from plugins.platforms.discord.adapter_slash_auth import DiscordSlashAuthMixin
 from plugins.platforms.discord.adapter_thread_titles import DiscordThreadTitlesMixin, SemanticThreadRenames
 from plugins.platforms.discord.adapter_voice_info import DiscordVoiceInfoMixin
 
 
-class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
-                     DiscordExecApprovalMixin, BasePlatformAdapter):
+class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin,
+                     DiscordSlashAuthMixin, DiscordExecApprovalMixin, BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
 
     MAX_MESSAGE_LENGTH = 2000
